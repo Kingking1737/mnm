@@ -2,33 +2,49 @@ import os
 import secrets
 import hashlib
 import time
+import threading
 import requests
 import nano_rspow
 import logging
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from nanopy import Account
 
 # ---------- تنظیمات ----------
 WAIT_AFTER_SUCCESS = 10
 EXTRA_WAIT_ON_RETRY = 10
-LOG_FILE = "faucet_run.log"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 
-# ---------- seed یک‌بار ----------
-# اگه روی Railway متغیر SEED رو ست کنی، از همون استفاده می‌کنه،
-# وگرنه هر بار رندوم می‌سازه.
+# ---------- وب‌سرور کوچیک برای health check ----------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # لاگ‌های HTTP رو ساکت کن
+
+def start_http_server():
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logging.info(f"HTTP health server running on port {port}")
+    server.serve_forever()
+
+# وب‌سرور توی thread جدا اجرا شه
+threading.Thread(target=start_http_server, daemon=True).start()
+
+
+# ---------- بقیه کدت عیناً همین‌جا ----------
 seed = os.getenv("SEED") or secrets.token_hex(32).upper()
 logging.info("=" * 70)
 logging.info(f"SEED: {seed}")
 logging.info("=" * 70)
-
 
 def derive_account(index: int):
     private_key = hashlib.blake2b(
@@ -36,7 +52,6 @@ def derive_account(index: int):
         digest_size=32
     ).hexdigest().upper()
     return Account(sk=private_key), private_key
-
 
 def extract_retry_seconds(body: dict):
     if not isinstance(body, dict):
@@ -48,7 +63,6 @@ def extract_retry_seconds(body: dict):
             except (ValueError, TypeError):
                 pass
     return None
-
 
 def try_claim(addr: str):
     try:
@@ -120,11 +134,10 @@ def try_claim(addr: str):
     return ("ok", None)
 
 
-# ---------- حلقه اصلی (بی‌نهایت) ----------
+# ---------- حلقه اصلی ----------
 index = 0
 while True:
     account, private_key = derive_account(index)
-
     logging.info(f"\nINDEX:   {index}")
     logging.info(f"PRIVATE: {private_key}")
     logging.info(f"ADDRESS: {account.addr}")
@@ -137,18 +150,15 @@ while True:
         logging.info(f"صبر {WAIT_AFTER_SUCCESS} ثانیه قبل از آدرس بعدی...")
         time.sleep(WAIT_AFTER_SUCCESS)
         continue
-
     elif status == "retry":
         total_wait = wait + EXTRA_WAIT_ON_RETRY
         logging.warning(
             f"⏳ فاست گفت {wait} ثانیه صبر کن. "
-            f"کل انتظار: {total_wait} ثانیه، "
-            f"بعد دوباره همون index={index} رو امتحان می‌کنم."
+            f"کل انتظار: {total_wait} ثانیه، دوباره همون index={index}"
         )
         time.sleep(total_wait)
         continue
-
-    else:  # fail
+    else:
         logging.warning(f"⛔ خطای غیرقابل‌retry (index={index}). بستن برنامه.")
         break
 
